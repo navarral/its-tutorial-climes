@@ -490,14 +490,6 @@ to_long <- function(grid) {
     mutate(type = recode(type, level = "Level change", slope = "Slope change"))
 }
 
-# This formula ignores slopes, seasons, and extra variation.
-# It therefore overstates power. It shows why events matter.
-approx_power <- function(periods_each_side, rr, births_scale = 1) {
-  events <- sum(provinces$births_mean) * births_scale * 0.07 * periods_each_side
-  se <- sqrt(1 / events + 1 / events)       # standard error of the log rate ratio
-  pnorm(abs(log(rr)) / se - 1.96)
-}
-
 # ---- Grid 1: window length and effect size --------------------------
 # Question: how many periods do we need before and after the policy start?
 grid1 <- merge(expand.grid(periods_each_side = c(6, 13, 26, 52, 78),
