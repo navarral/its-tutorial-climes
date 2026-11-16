@@ -106,9 +106,11 @@ provinces$births_mean <- as.integer(provinces$births_annual / 13)
 # After one year, the rate sits 28% below the counterfactual (0.80 x 0.90).
 # After two years, the rate sits 35% below it (0.80 x 0.90 x 0.90).
 
-simulate_its <- function(n_pre = 26, n_post = 26, rr = 0.80, slope_rr = 0.90,
-                         baseline = 0.07, pre_slope = 0,
-                         births_scale = 1, rho = 0.3, noise_sd = 0.05) {
+simulate_its <- function(
+    n_pre = 26, n_post = 26, rr = 0.80, slope_rr = 0.90,
+    baseline = 0.07, pre_slope = 0,
+    births_scale = 1, rho = 0.3, noise_sd = 0.05
+) {
   n <- n_pre + n_post
   df <- expand.grid(period = 1:n, province = provinces$province)
   idx <- as.integer(df$province)
@@ -136,7 +138,7 @@ simulate_its <- function(n_pre = 26, n_post = 26, rr = 0.80, slope_rr = 0.90,
   log_odds <- qlogis(baseline) + province_effect[idx] +
     pre_slope * df$time_c + slope_change * df$time_after +
     level_change * df$policy +
-    0.05 * df$sin1 + 0.03 * df$cos1 + noise
+    0.05 * df$sin1 + 0.1 * df$cos1 + noise
 
   df$births  <- pmax(rpois(nrow(df), provinces$births_mean[idx] * births_scale), 10)
   df$preterm <- rbinom(nrow(df), size = df$births, prob = plogis(log_odds))
@@ -146,7 +148,10 @@ simulate_its <- function(n_pre = 26, n_post = 26, rr = 0.80, slope_rr = 0.90,
 n_pre  <- 26   # 26 periods = 2 years before the policy
 n_post <- 26   # 26 periods = 2 years after the policy
 df <- simulate_its(n_pre, n_post, rr = 0.80, slope_rr = 0.90)
+
 head(df)
+glimpse(df)
+summary(df)
 
 # ------------------------------------------------------------------
 # PART 5. LOOK AT THE DATA
@@ -194,7 +199,6 @@ abline(v = n_pre + 0.5, lty = 2)   # The dashed line marks the policy start.
 # Choice 3. Level change and slope change.
 #   The level change measures an immediate effect.
 #   The slope change measures an effect that grows or fades over time.
-#   The slope change needs many post-policy periods to detect (see Part 9).
 # Choice 4. Seasonality.
 #   We use sine and cosine terms with a 13-period cycle.
 #   Seasonal terms need at least one full year before the policy start.
@@ -222,6 +226,8 @@ abline(v = n_pre + 0.5, lty = 2)   # The dashed line marks the policy start.
 # PART 7. FIT THE BAYESIAN MODEL
 # ------------------------------------------------------------------
 # "0 + Intercept" makes the intercept the rate at the policy start.
+# (1 | province) gives each province its own baseline rate.
+# (1 | period) absorbs the shared shock in each period.
 # The first run compiles the model. Compiling takes about one minute.
 
 formula_its <- bf(
@@ -238,9 +244,9 @@ priors_its <- c(
 
 fit <- brm(
   formula_its, data = df, family = binomial(), prior = priors_its,
-  # Uncomment this line and comment 4 lines below to run MCMC
+  # Uncomment this line and comment 4 lines below to run faster model
   algorithm = "sampling", iter = 2000, warmup = 1000, chains = 2, cores = 2, threads = 2,
-  # algorithm = "fullrank",        # fast ADVI instead of MCMC 
+  # algorithm = "fullrank",      # fast ADVI instead of MCMC 
   # iter = 20000,                # maximum number of ADVI steps
   # output_samples = 2000,       # posterior draws kept
   # tol_rel_obj = 0.001,         # stopping rule
@@ -258,14 +264,8 @@ pp_check(fit, ndraws = 100)
 pp_check(fit, type = "intervals")
 
 # ------------------------------------------------------------------
-# PART 8. READ THE RESULTS
+# PART 8. SUMMARISE ITS RESULTS
 # ------------------------------------------------------------------
-dr <- as.data.frame(as_draws_df(fit))
-
-# Rate ratio of the level change at the policy start. Below 1 means a decrease.
-rate_ratio <- plogis(dr$b_Intercept + dr$b_policy) / plogis(dr$b_Intercept)
-
-# ---- Summarise ITS model fits ---------------------------------------
 # source 1: https://easystats.github.io/bayestestR/articles/
 # source 2: https://easystats.github.io/bayestestR/articles/guidelines.html
 #
@@ -284,9 +284,12 @@ rate_ratio <- plogis(dr$b_Intercept + dr$b_policy) / plogis(dr$b_Intercept)
 # We work on the log scale, because the model works on that scale.
 rope_ratio <- c(0.95, 1.05)
 
+# Extract draws form model
+dr <- as.data.frame(as_draws_df(fit))
+
 draws_log <- data.frame(
-  level_change = log(rate_ratio),   # log rate ratio at the policy start
-  slope_change = dr$b_time_after    # log rate ratio per year
+  level_change = dr$b_policy,
+  slope_change = dr$b_time_after
 )
 
 summary_its <- describe_posterior(
@@ -294,13 +297,13 @@ summary_its <- describe_posterior(
   centrality = "median",
   ci = 0.95, ci_method = "hdi",
   test = c("p_direction", "rope"),
-  rope_range = log(rope_ratio), rope_ci = 0.95
+  rope_range = log(rope_ratio), rope_ci = 1
 )
 
 # We convert the median and the HDI back to rate ratios.
 summary_its %>%
   mutate(across(c(Median, CI_low, CI_high), exp)) %>%
-  select(Parameter, Median, CI_low, CI_high, pd, ROPE_Percentage) %>%
+  dplyr::select(Parameter, Median, CI_low, CI_high, pd, ROPE_Percentage) %>%
   mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
   print()
 
@@ -309,63 +312,23 @@ summary_its %>%
 cat("\nTrue level change in the simulation:  rate ratio 0.80\n")
 cat("True slope change in the simulation:  rate ratio 0.90 per year\n")
 
-# Total effect at the end of the post-policy window.
-# We use the fitted and counterfactual rates from the next block.
-n <- n_pre + n_post
-X <- cbind(Intercept  = 1,
-           time_c     = (1:n - (n_pre + 1)) / 13,
-           policy     = as.numeric(1:n > n_pre),
-           time_after = pmax((1:n - (n_pre + 1)) / 13, 0),
-           sin1       = sin(2 * pi * (1:n) / 13),
-           cos1       = cos(2 * pi * (1:n) / 13))
-B <- as.matrix(dr[, paste0("b_", colnames(X))])
 
-# The counterfactual switches the policy off.
-X0 <- X                          
-X0[, c("policy", "time_after")] <- 0
+# Calculate trends before and after, remember that tim_after coefficient is the
+# relative change of the mean
+trend_draws <- data.frame(
+  before = exp(dr$b_time_c),
+  after = exp(dr$b_time_c + dr$b_time_after)
+)
 
-rate_fit <- plogis(B %*% t(X))
-rate_cf  <- plogis(B %*% t(X0))
+# How do you interpret these results?
+lapply( trend_draws, function(x){quantile(x, probs = c(median = 0.50, lower = 0.025, upper = 0.975)) %>% round(2)})
 
-rr_end <- rate_fit[, n] / rate_cf[, n]
-cat("\nRate ratio at the end of the post-policy window (median, 95% interval):\n")
-print(round(quantile(rr_end, c(0.5, 0.025, 0.975)), 3))
+# ------------------------------------------------------------------
+# PART 9. COMPUTE COUNTERFACTUALS
+# ------------------------------------------------------------------
 
-# Plot the fitted line and the counterfactual.
-# colors plot: #fe6100, #648fff
-tibble(
-  period    = 1:n,
-  observed  = 100 * lombardy$rate,
-  fit_median    = 100 * apply(rate_fit, 2, median),
-  fit_low    = 100 * apply(rate_fit, 2, quantile, 0.025),
-  fit_high   = 100 * apply(rate_fit, 2, quantile, 0.975),
-  cf_median = 100 * apply(rate_cf, 2, median),
-  cf_low    = 100 * apply(rate_cf, 2, quantile, 0.025),
-  cf_high   = 100 * apply(rate_cf, 2, quantile, 0.975)
-) %>%
-  ggplot(aes(x = period)) +
-  geom_ribbon(aes(ymin = cf_low, ymax = cf_high, alpha = period > n_pre), fill = "#648fff") +
-  geom_line(aes(y = cf_median), colour = "#648fff", linetype = "dotted", linewidth = 1) +
-  geom_line(aes(y = fit_median), linewidth = 1) +
-  geom_ribbon(aes(ymin = fit_low, ymax = fit_high), fill = "black", alpha = 0.2) +
-  geom_point(aes(y = observed), colour = "black", size = 2) +
-  geom_vline(xintercept = n_pre + 0.5, linetype = "dashed") +
-  labs(
-    title = "Observed rate, fitted rate, and counterfactual",
-    x = "Time [4 weeks]",
-    y = "Preterm rate [%]"
-  ) +
-  scale_alpha_manual(
-    values = c("FALSE" = 0, "TRUE" = 0.2),
-    guide = "none"
-  )
+# 9.1. Compute counterfactual for each province 
 
-# Check autocorrelation. Bars outside the dashed lines signal a problem.
-# A problem means the credible interval is too narrow.
-residual_rate <- lombardy$rate - apply(rate_fit, 2, median)
-acf(residual_rate, main = "Autocorrelation of residuals")
-
-# Provincial plot
 # Keep the same row order for predictions and observed rates.
 plot_data <- df %>%
   arrange(province, period)
@@ -380,6 +343,7 @@ counterfactual_data <- plot_data %>%
   )
 
 # Predict expected counts, including province effects.
+# The period effects stay in both predictions, so shared shocks cancel in ratios.
 count_fit <- posterior_epred(
   fit,
   newdata = plot_data,
@@ -425,8 +389,60 @@ ggplot(plot_data, aes(x = period)) +
     y = "Preterm rate [%]"
   )
 
+# 9.2. Counterfactual for the whole region
+
+# We add the expected counts of all provinces in each period.
+# Then we divide by the births of all provinces in that period.
+period_ids <- sort(unique(plot_data$period))
+
+region_rate <- function(count_draws) {
+  sapply(period_ids, function(p) {
+    in_period <- plot_data$period == p
+    100 * rowSums(count_draws[, in_period]) / sum(plot_data$births[in_period])
+  })
+}
+
+region_fit <- region_rate(count_fit)   # one row per draw, one column per period
+region_cf  <- region_rate(count_cf)
+
+lombardy <- plot_data %>%
+  group_by(period) %>%
+  summarise(observed = 100 * sum(preterm) / sum(births), .groups = "drop") %>%
+  mutate(
+    fit_median = apply(region_fit, 2, median),
+    fit_low     = apply(region_fit, 2, quantile, probs = 0.025),
+    fit_high    = apply(region_fit, 2, quantile, probs = 0.975),
+    cf_median  = apply(region_cf, 2, median),
+    cf_low     = apply(region_cf, 2, quantile, probs = 0.025),
+    cf_high    = apply(region_cf, 2, quantile, probs = 0.975)
+  )
+
+ggplot(lombardy, aes(x = period)) +
+  geom_ribbon( aes(ymin = fit_low, ymax = fit_high), fill = "black", alpha = 0.5  ) +
+  geom_ribbon( data = filter(lombardy, period > n_pre), aes(ymin = cf_low, ymax = cf_high), fill = "#648fff", alpha = 0.5) +
+  geom_line( aes(y = cf_median), colour = "#648fff", linetype = "dotted", linewidth = 0.8) +
+  geom_line( aes(y = fit_median), colour = "black", linewidth = 0.8) +
+  geom_point( aes(y = observed), colour = "black", size = 1) +
+  geom_vline( xintercept = n_pre + 0.5, linetype = "dashed" ) +
+  labs(
+    title = "Observed rate, fitted rate, and counterfactual in Lombardy",
+    subtitle = "Black: fitted. Orange: counterfactual with 95% credible interval.",
+    x = "Period [4 weeks]",
+    y = "Preterm rate [%]"
+  )
+
+
+# 9.3. Total effect at the end of the post-policy window
+# For each draw, we divide the fitted rate by the counterfactual rate.
+last <- length(period_ids)
+# Risk Ratio = Chance of preterm after policy / chance of preterm before policy
+rr_end <- region_fit[, last] / region_cf[, last]
+
+cat("\nRate ratio at the end of the post-policy window (median, 95% interval):\n")
+print(round(quantile(rr_end, c(0.5, 0.025, 0.975)), 3))
+
 # ------------------------------------------------------------------
-# PART 9. POWER CALCULATION BY SIMULATION
+# PART 10. POWER CALCULATION BY SIMULATION
 # ------------------------------------------------------------------
 # Power is the probability that a study detects a true effect.
 # We estimate power in four steps:
@@ -466,9 +482,11 @@ power_glm <- function(n_pre, n_post, rr, slope_rr, births_scale = 1, n_sim = 100
 
 # ---- Helpers ----------------------------------------------------------
 # Three effect scenarios. Each scenario has a level change and a slope change.
-scenarios <- data.frame(size     = c("Small", "Medium", "Large"),
-                        rr       = c(0.90, 0.80, 0.70),
-                        slope_rr = c(0.95, 0.90, 0.85))
+scenarios <- data.frame(
+  size = c("Small", "Medium", "Large"),
+  rr = c(0.90, 0.80, 0.70),
+  slope_rr = c(0.95, 0.90, 0.85)
+)
 scenarios$scenario <- sprintf("%s (level -%d%%, slope -%d%% per year)",
                               scenarios$size,
                               round((1 - scenarios$rr) * 100),
@@ -502,7 +520,7 @@ grid1_long <- to_long(run_grid(grid1))
 
 cat("\nPOWER by window length (periods on each side) and scenario\n")
 grid1_long %>%
-  select(periods_each_side, scenario, type, power) %>%
+  dplyr::select(periods_each_side, scenario, type, power) %>%
   pivot_wider(names_from = scenario, values_from = power) %>%
   arrange(type, periods_each_side) %>%
   print()
@@ -535,7 +553,7 @@ grid2_long <- to_long(run_grid(grid2))
 
 cat("\nPOWER by births per period and scenario, 26 periods on each side\n")
 grid2_long %>%
-  select(births_per_period, scenario, type, power) %>%
+  dplyr::select(births_per_period, scenario, type, power) %>%
   pivot_wider(names_from = scenario, values_from = power) %>%
   arrange(type, births_per_period) %>%
   print()
@@ -556,14 +574,14 @@ ggplot(grid2_long, aes(x = births_per_period, y = power, colour = scenario)) +
 
 # ---- Grid 3: unequal windows ----------------------------------------
 # Question: does it matter if we have more periods before than after?
-# We use the medium scenario: level -20%, slope -10% per year.
+# We use the small scenario: level -10%, slope -5% per year.
 grid3 <- expand.grid(n_pre = c(6, 13, 26, 52, 78, 104), n_post = c(6, 13, 26, 52, 78, 104))
-grid3$rr <- 0.80
-grid3$slope_rr <- 0.90
+grid3$rr <- 0.90
+grid3$slope_rr <- 0.95
 grid3$births_scale <- 1
 grid3_long <- to_long(run_grid(grid3))
 
-cat("\nPOWER for the medium scenario with unequal windows\n")
+cat("\nPOWER for the small scenario with unequal windows\n")
 grid3_long %>%
   pivot_wider(names_from = n_post, values_from = power,
               id_cols = c(type, n_pre)) %>%
@@ -577,11 +595,11 @@ ggplot(grid3_long, aes(x = factor(n_post), y = factor(n_pre), fill = power)) +
   facet_wrap(~ type) +
   scale_colour_identity() +
   scale_fill_viridis_c(limits = c(0, 1), labels = scales::percent) +
-  labs(title = "Power with unequal windows (medium scenario)",
+  labs(title = "Power with unequal windows (small scenario)",
        x = "Post-policy periods", y = "Pre-policy periods", fill = "Power")
 
 # ------------------------------------------------------------------
-# PART 10. POWER CHECK WITH brms (OPTIONAL, ABOUT 2-3 MINUTES)
+# PART 11. POWER CHECK WITH brms (OPTIONAL, ABOUT 2-3 MINUTES)
 # ------------------------------------------------------------------
 # We reuse the compiled model. We refit it on 20 new simulated studies.
 # A study detects an effect when its 95% credible interval lies fully below the ROPE.
@@ -635,7 +653,7 @@ if (run_bayes_power) {
 }
 
 # ------------------------------------------------------------------
-# PART 11. HOW TO CHOOSE A DESIGN
+# PART 12. HOW TO CHOOSE A DESIGN
 # ------------------------------------------------------------------
 # 1. Fix the smallest level change and slope change worth detecting.
 # 2. Use at least 13 periods before the policy start, to estimate seasons.
@@ -647,9 +665,9 @@ if (run_bayes_power) {
 # 7. Fit the final model with MCMC (algorithm = "sampling").
 
 # ------------------------------------------------------------------
-# PART 12. EXERCISES
+# PART 13. EXERCISES
 # ------------------------------------------------------------------
-# 1. Change rr to 0.90 in simulate_its(). Refit the model. What changes?
+# 1. Change rr to X in simulate_its(). Refit the model. What changes?
 # 2. Set rho = 0.7 and noise_sd = 0.10. Check the autocorrelation plot.
 # 3. Set slope_rr = 1 (no slope change). Does the model still report one?
 # 4. Set n_post = 13. Does the slope change stay detectable?
