@@ -40,13 +40,38 @@
 # We add province intercepts because provinces differ in baseline rate.
 
 # ------------------------------------------------------------------
-# PART 2. THE BAYESIAN IDEA, IN BRIEF
+# PART 2. THE BAYESIAN IDEA
 # ------------------------------------------------------------------
-# A Bayesian model starts with a prior for each value.
+
+# BAYESIAN STATISTICS UPDATES UNCERTAINTY USING DATA
+#
+# We combine three elements:
+# 1. Prior: plausible parameter values before observing these data.
+# 2. Likelihood: how the model connects parameters to observations.
+# 3. Posterior: plausible parameter values after observing the data.
+#
+# A Bayesian model starts with a prior for each value. 
 # The data update each prior into a posterior.
 # We read the posterior directly as probabilities.
-# Example: "The probability that the policy lowered the rate is 98%."
-# MCMC is the standard way to compute a posterior. MCMC is slow.
+# Example: "We are 95% confident (probability) that the policy lowered the rate by X%.
+#
+# BENEFITS
+# - We express uncertainty directly as probabilities.
+#   Example: What is the probability that risk exceeds 10%?
+# - We incorporate previous research and carry uncertainty into predictions.
+# - Multilevel models share information between related groups.
+# - Groups with limited data borrow information through the shared model.
+#
+# LIMITATIONS
+# - Results depend on priors and model assumptions.
+# - Strong priors can dominate when data provide little information.
+# - Higher computation time compared to frequentist
+#
+# COMPUTATION
+# - We use ADVI for classroom exploration.
+# - We validate important conclusions using MCMC.
+#
+# MCMC is the standard way to compute a posterior, but can be slow.
 # ADVI is a fast approximation of the posterior. ADVI takes seconds.
 # We use ADVI here ("fullrank") so the class can run all the code.
 # ADVI can understate uncertainty. Use MCMC for a real analysis.
@@ -101,11 +126,8 @@ provinces$births_mean <- as.integer(provinces$births_annual / 13)
 #   births_scale  multiplier for births (0.5 means half the births)
 #   rho           correlation between neighbouring periods (autocorrelation)
 #   noise_sd      size of random variation beyond binomial chance
-#
-# Example: rr = 0.80 and slope_rr = 0.90 give a 20% drop at the policy start.
-# After one year, the rate sits 28% below the counterfactual (0.80 x 0.90).
-# After two years, the rate sits 35% below it (0.80 x 0.90 x 0.90).
 
+# Function to simulate the data
 simulate_its <- function(
     n_pre = 26, n_post = 26, rr = 0.80, slope_rr = 0.90,
     baseline = 0.07, pre_slope = 0,
@@ -145,8 +167,9 @@ simulate_its <- function(
   df
 }
 
-n_pre  <- 26   # 26 periods = 2 years before the policy
-n_post <- 26   # 26 periods = 2 years after the policy
+# Remeber each unit is 4 weeks, 13 in a year
+n_pre  <- 26   # 26 = 2 years before the policy
+n_post <- 26   # 26 = 2 years after the policy
 df <- simulate_its(n_pre, n_post, rr = 0.80, slope_rr = 0.90)
 
 head(df)
@@ -194,7 +217,7 @@ abline(v = n_pre + 0.5, lty = 2)   # The dashed line marks the policy start.
 #   We model preterm births out of births with a binomial family.
 #   The binomial family respects the counts in small provinces.
 # Choice 2. Time scale.
-#   We measure time in years and centre it at the policy start.
+#   We measure time in years, centred at the policy start.
 #   The policy coefficient then equals the level change at the policy start.
 # Choice 3. Level change and slope change.
 #   The level change measures an immediate effect.
@@ -205,13 +228,10 @@ abline(v = n_pre + 0.5, lty = 2)   # The dashed line marks the policy start.
 # Choice 5. Provinces.
 #   A random intercept lets each province keep its own baseline rate.
 #   Small provinces borrow strength from large provinces.
-# Choice 6. Extra variation.
-#   Real data vary more than chance alone predicts.
-#   The binomial family ignores this extra variation, so intervals run narrow.
-#   The beta-binomial family absorbs it but needs starting values in ADVI.
+# Choice 6. Overdispersion.
+#   If overdispersion is present in the model, use beta-binomial family
 # Choice 7. Autocorrelation.
-#   Neighbouring periods often resemble each other.
-#   We check autocorrelation after fitting (Part 8).
+#   Neighbouring periods often resemble each other (autocorrelation).
 # Choice 8. Phase-in period.
 #   Policies often take months to work.
 #   Consider dropping periods right after the policy start.
@@ -227,8 +247,6 @@ abline(v = n_pre + 0.5, lty = 2)   # The dashed line marks the policy start.
 # ------------------------------------------------------------------
 # "0 + Intercept" makes the intercept the rate at the policy start.
 # (1 | province) gives each province its own baseline rate.
-# (1 | period) absorbs the shared shock in each period.
-# The first run compiles the model. Compiling takes about one minute.
 
 formula_its <- bf(
   preterm | trials(births) ~ 0 + Intercept + time_c + policy + time_after +
@@ -242,6 +260,7 @@ priors_its <- c(
   prior(exponential(10),   class = "sd")                      # province variation
 )
 
+# The first run compiles the model. Compiling takes about one minute.
 fit <- brm(
   formula_its, data = df, family = binomial(), prior = priors_its,
   # Uncomment this line and comment 4 lines below to run faster model
@@ -253,8 +272,9 @@ fit <- brm(
   seed = 2026, refresh = 0
 )
 
-# Stan may print ADVI messages and warnings
+# Model summary
 summary(fit)
+prior_summary(fit)
 
 # Check fit
 pp_check(fit, ndraws = 100)
@@ -262,6 +282,10 @@ pp_check(fit, ndraws = 100)
 # Check overdispersion: if bionomial is well-adjusted we should see the 95% of 
 # real points within the 95% bands
 pp_check(fit, type = "intervals")
+
+# Residual check: the autocorrelation of residuals should look small.
+res <- residuals(fit, summary = TRUE)[, "Estimate"]
+acf(res, lag.max = 20, main = "Residual autocorrelation")
 
 # ------------------------------------------------------------------
 # PART 8. SUMMARISE ITS RESULTS
@@ -332,8 +356,6 @@ lapply( trend_draws, function(x){quantile(x, probs = c(median = 0.50, lower = 0.
 # Keep the same row order for predictions and observed rates.
 plot_data <- df %>%
   arrange(province, period)
-
-stopifnot(all(plot_data$births > 0))
 
 # Switch off the intervention for the counterfactual.
 counterfactual_data <- plot_data %>%
